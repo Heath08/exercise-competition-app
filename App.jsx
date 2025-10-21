@@ -68,6 +68,17 @@ const DEFAULT_STATE = {
   _meta: { updatedAt: Date.now(), updatedBy: deviceId, version: 1 },
 };
 
+const AUTO_CONNECT = import.meta.env.VITE_AUTO_CONNECT === "true";
+const DEFAULT_ROOM_ID = import.meta.env.VITE_DEFAULT_ROOM_ID || "";
+let FIREBASE_CONFIG = null;
+try {
+  FIREBASE_CONFIG = import.meta.env.VITE_FIREBASE_CONFIG
+    ? JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG)
+    : null;
+} catch {
+  FIREBASE_CONFIG = null;
+}
+
 function useLocalState(initial) {
   const [state, setState] = useState(() => {
     try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : initial; } catch { return initial; }
@@ -116,7 +127,6 @@ function Leaderboard({ players }) {
     </Card>
   );
 }
-
 function PointsConfig({ config, onUpdate }) {
   const [local, setLocal] = useState(config);
   useEffect(() => setLocal(config), [config]);
@@ -189,7 +199,6 @@ function PlayerSetup({ players, onUpdate }) {
     </Card>
   );
 }
-
 function ActivityLogger({ players, config, onLog }) {
   const [who, setWho] = useState(players[0]?.id || "p1");
   const [type, setType] = useState("workout");
@@ -314,7 +323,7 @@ function SmackTalk({ chat, onSend, bannedWords }) {
     </Card>
   );
 }
-
+// PWA
 function usePWA() {
   useEffect(() => {
     const manifest = {
@@ -353,7 +362,6 @@ function usePWA() {
       const swUrl = URL.createObjectURL(blobSW);
       navigator.serviceWorker.register(swUrl).catch(() => {});
     }
-    return () => {};
   }, []);
 }
 
@@ -428,7 +436,7 @@ export default function App() {
   });
 
   const addPoints = (playerId, pts, activity) => {
-    const weekUsed = weeklyTotals[playerId] || 0; const remaining = config.weeklyPointCap - weekUsed; const grant = clamp(pts, 0, Math.max(0, remaining));
+    const weekUsed = weeklyTotals[playerId] || 0; const remaining = config.weeklyPointCap - weekUsed; const grant = Math.max(0, Math.min(pts, Math.max(0, remaining)));
     setState((prev) => markUpdated({
       ...prev,
       players: prev.players.map((p) => p.id !== playerId ? p : { ...p, points: p.points + grant, activities: [...p.activities, { ...activity, points: grant, weekKey: currentWeekKey }] }),
@@ -441,7 +449,6 @@ export default function App() {
     setState((prev) => {
       const target = prev.players.find((p) => p.id === who);
       const start = target?.startWeight ?? weight; const prevWeight = target?.currentWeight ?? start;
-      const delta = Math.max(0, prevWeight - weight);
       const updPlayers = prev.players.map((p) => p.id !== who ? p : { ...p, startWeight: p.startWeight ?? start, currentWeight: weight, history: [...p.history, { when, weight }] });
       return markUpdated({ ...prev, players: updPlayers });
     });
@@ -470,7 +477,7 @@ export default function App() {
       const auth = getAuth(app);
       await signInAnonymously(auth);
       firestoreRef.current = { db, docRef: doc(db, "rooms", roomId) };
-      setSync({ connected: True, status: "connected", roomId, firebaseConfigString, error: null });
+      setSync({ connected: true, status: "connected", roomId, firebaseConfigString, error: null });
       if (unsubRef.current) unsubRef.current();
       unsubRef.current = onSnapshot(firestoreRef.current.docRef, (snap) => {
         const data = snap.data();
@@ -482,35 +489,40 @@ export default function App() {
         lastRemoteAtRef.current = remoteMeta;
         setState(remote);
       });
-      await setDoc(firestoreRef.current.docRef, { state }, { merge: True });
+      await setDoc(firestoreRef.current.docRef, { state }, { merge: true });
     } catch (e) {
-      setSync({ connected: False, status: "error", roomId: "", firebaseConfigString, error: e.message || String(e) });
+      setSync({ connected: false, status: "error", roomId: "", firebaseConfigString, error: e.message || String(e) });
     }
   };
 
   const disconnect = () => {
     if (unsubRef.current) { unsubRef.current(); unsubRef.current = null; }
-    firestoreRef.current = null; setSync((s) => ({ ...s, connected: False, status: "idle" }));
+    firestoreRef.current = null; setSync((s) => ({ ...s, connected: false, status: "idle" }));
   };
 
-  const pushRemote = useRef(debounce(async (next) => {
+  const pushRemote = useRef(((fn, ms = 600) => {
+    let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  })(async (next) => {
     try {
       if (!firestoreRef.current || !sync.connected) return;
-      pushingRef.current = true;
       await setDoc(firestoreRef.current.docRef, { state: next, updatedAt: serverTimestamp() }, { merge: true });
-      pushingRef.current = false;
     } catch (e) { /* ignore */ }
-  }, 600)).current;
+  })).current;
 
   useEffect(() => {
     if (!sync.connected) return;
-    if (pushingRef.current) return;
     pushRemote(state);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, sync.connected]);
 
-  const streaks = useMemo(() => {
-    const res = {}; players.forEach((p) => { const days = new Set(p.activities.map((a) => new Date(a.when).toDateString())); let s = 0; const cur = new Date(); for (let i = 0; i < 30; i++) { const key = cur.toDateString(); if (days.has(key)) s++; else break; cur.setDate(cur.getDate() - 1); } res[p.id] = s; }); return res;
-  }, [players]);
+  // Auto-connect via env
+  useEffect(() => {
+    if (!AUTO_CONNECT || !FIREBASE_CONFIG || !DEFAULT_ROOM_ID) return;
+    if (!sync.connected) {
+      connect({ roomId: DEFAULT_ROOM_ID, firebaseConfigString: JSON.stringify(FIREBASE_CONFIG) });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [AUTO_CONNECT, DEFAULT_ROOM_ID, FIREBASE_CONFIG]);
 
   return (
     <div style={{ background: theme.bg, minHeight: "100vh" }} className="p-4 md:p-8">
@@ -535,7 +547,7 @@ export default function App() {
             <Card className="mt-4" style={{ background: theme.card }}>
               <h3 className="text-lg font-semibold" style={{ color: theme.text }}>Season Tools</h3>
               <div className="flex gap-2 mt-3 flex-wrap">
-                <Button style={{ background: theme.warn, color: "#0b0b0b" }} onClick={resetSeason}>Start New Season</Button>
+                <Button style={{ background: theme.warn, color: "#0b0b0b" }} onClick={() => setState({ ...DEFAULT_STATE, config: state.config, seasonIndex: state.seasonIndex + 1, players: state.players.map(p => ({ ...p, points: 0, activities: [], history: [] })), startedAt: Date.now() })}>Start New Season</Button>
                 <Button style={{ background: theme.accent, color: "#0b0b0b" }} onClick={() => navigator.clipboard?.writeText(btoa(JSON.stringify(state)))}>Copy Share Code</Button>
                 <Button style={{ background: theme.accent2, color: "#0b0b0b" }} onClick={() => { const raw = prompt("Paste Share Code"); if (!raw) return; try { const parsed = JSON.parse(atob(raw)); setState(parsed); } catch { alert("Invalid code"); } }}>Import</Button>
               </div>
@@ -544,7 +556,7 @@ export default function App() {
               </div>
             </Card>
 
-            <SyncPanel sync={sync} setSync={setSync} onConnect={connect} onDisconnect={disconnect} />
+            <SyncPanel sync={sync} setSync={setSync} onConnect={connect} onDisconnect={() => { if (unsubRef.current) unsubRef.current(); unsubRef.current = null; setSync(s => ({ ...s, connected: false, status: "idle" })); }} />
           </div>
         </div>
 
